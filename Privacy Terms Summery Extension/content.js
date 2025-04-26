@@ -1,201 +1,95 @@
-//Debug
 console.log("Content script loaded on", window.location.href);
 
-//List of domains where not to run this code.
 const excludedDomains = ["www.google.com", "www.bing.com"];
 
-if (excludedDomains.includes(window.location.hostname)) { // If the current domain is in the excluded list, then do nothing.
- 
-  //Debug
-  console.log("Domain excluded from privacy checks:", window.location.hostname);
-} else {// Else, begin the fuction
-  
-  if (window.top === window) {
 
-    // Keywords to look anywhere in link href or text
-    const keywords = ["privacy", "cookies", "policy", "terms", "legal"];
-    
-    // Function to find a link whose href or text has the keywords
-    function findKeywordLink() {
-      return Array.from(document.querySelectorAll("a[href]")).find((a) => {
-        const lowerHref = a.href.toLowerCase();
-        const lowerText = a.textContent.toLowerCase();
-        return keywords.some((word) => lowerHref.includes(word) || lowerText.includes(word));
-      });
-    }
+  const keywords = ["privacy", "cookies", "policy", "terms", "legal"];
 
-    // Function to check ALL elements for text containing the keywords
-    // This might catch a "Privacy Policy" button or some JS-based element
-    function findElementWithKeyword() {
-      return Array.from(document.querySelectorAll("*")).find((el) => {
-        const txt = el.textContent.toLowerCase();
-        return keywords.some((word) => txt.includes(word));
-      });
-    }
+  // search a link with keyword in href or text
+  function findKeywordLink() {
+    return Array.from(document.querySelectorAll("a[href]")).find(a => {
+      const href = a.href.toLowerCase();
+      const text = (a.textContent || "").toLowerCase();
+      return keywords.some(k => href.includes(k) || text.includes(k));
+    });
+  }
 
-    window.addEventListener("load", () => {
-      let linkFound = false;
+  // find any element containing a keyword
+  function findElementWithKeyword() {
+    return Array.from(document.querySelectorAll("*")).find(el => {
+      const txt = (el.textContent || "").toLowerCase();
+      return keywords.some(k => txt.includes(k));
+    });
+  }
 
-      function attemptLinkDetection() {
-        const link = findKeywordLink();
-        if (link) {
-          linkFound = true;
-          console.log("Found link with keyword:", link.href);
-
-          // Send the link's URL to the background script for fetching & summarizing
-          chrome.runtime.sendMessage({
-            action: "fetchAndSummarize",
-            url: link.href,
-          });
-        } else {
-          console.log("No link found yet with keywords:", keywords);
-        }
-      }
-
-      // Try after load right away
-      attemptLinkDetection();
-
-      // For late added ones
+  // main detection logic
+  function attemptLinkDetection() {
+    let link = findKeywordLink();
+    if (link) {
+      console.log("Found link:", link.href);
+      chrome.runtime.sendMessage({ action: "fetchAndSummarize", url: link.href });
+    } else {
       const observer = new MutationObserver(() => {
-        if (!linkFound) {
-          attemptLinkDetection();
-          if (linkFound) {
-            observer.disconnect();
-            clearTimeout(fallbackTimeout);
-          }
+        link = findKeywordLink();
+        if (link) {
+          observer.disconnect();
+          clearTimeout(timeout);
+          chrome.runtime.sendMessage({ action: "fetchAndSummarize", url: link.href });
         }
       });
       observer.observe(document.body, { childList: true, subtree: true });
-
-      // If still no link found after 5sec, then check for any element with keywords
-      const fallbackTimeout = setTimeout(() => {
-        if (!linkFound) {
-          console.log("No link found after 5s. Checking all elements for keywords...");
-          observer.disconnect();
-
-          const elementMatch = findElementWithKeyword();
-          if (elementMatch) {
-            console.log("Found an element with privacy-related text, but no direct link to fetch:", elementMatch);
-            // Display a popup telling the user that the keywords were found but no link
-            showElementTextFoundPopup();
-          } else {
-            // If nothing was found, display fallback
-            showNoLinkFoundPopup();
-          }
-        }
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        const el = findElementWithKeyword();
+        if (el) showElementTextFoundPopup();
+        else showNoLinkFoundPopup();
       }, 5000);
-    });
-
-    // Listen for background script to return the summary
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.action === "display") {
-        showSummaryPopup(message.summary);
-      }
-    });
-
-// Creates the summary popup if found
-function showSummaryPopup(summary) {
-    const popup = document.createElement("div");
-    popup.style.position = "fixed";
-    popup.style.top = "50%";                // halfway down the screen
-    popup.style.right = "10px";             // 10px from the right edge
-    popup.style.transform = "translateY(-50%)"; // shift up by 50% of its height
-  
-    popup.style.width = "300px";
-    popup.style.padding = "15px";
-    popup.style.background = "white";
-    popup.style.border = "1px solid #ccc";
-    popup.style.boxShadow = "0 4px 8px rgba(0, 0, 0, 0.2)";
-    popup.style.zIndex = "10000";
-    popup.style.borderRadius = "8px";
-    popup.style.wordWrap = "break-word";
-  
-    popup.innerHTML = `<strong>Privacy Terms Summarized:</strong><p>${summary}</p>`;
-  
-    const closeButton = document.createElement("button");
-    closeButton.innerText = "Close";
-    closeButton.style.marginTop = "10px";
-    closeButton.style.padding = "5px 10px";
-    closeButton.style.border = "none";
-    closeButton.style.background = "#00cca3";
-    closeButton.style.color = "white";
-    closeButton.style.borderRadius = "4px";
-    closeButton.style.cursor = "pointer";
-    closeButton.addEventListener("click", () => popup.remove());
-  
-    popup.appendChild(closeButton);
-    document.body.appendChild(popup);
+    }
   }
-  
-  // Shows a popup if keywords were found but no direct link
+
+  // listen for toolbar click and summary display
+  chrome.runtime.onMessage.addListener(message => {
+    if (message.action === "startSummarize") {
+      attemptLinkDetection();
+    } else if (message.action === "display") {
+      showSummaryPopup(message.summary);
+    }
+  });
+
+  // shadow DOM isolated summary popup
+  function showSummaryPopup(summary) {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = `
+      .popup { all: initial; position: fixed; top:50%; right:10px; transform: translateY(-50%);
+        width:320px; padding:16px; background:#002B36; color:#EEE8D5;
+        border:2px solid #586E75; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        font-family:sans-serif; line-height:1.4; z-index:2147483647; }
+      .popup h4 { margin:0 0 8px; font-size:16px; }
+      .popup p { margin:0 0 12px; font-size:14px; }
+      .popup button { all: initial; cursor:pointer; padding:6px 12px; background:#586E75;
+        color:#FDF6E3; border-radius:4px; font-size:13px; display:inline-block; }
+      .popup button:hover { background:#657B83; }
+    `;
+    shadow.appendChild(style);
+    const container = document.createElement("div");
+    container.classList.add("popup");
+    container.innerHTML = `
+      <h4>Privacy Terms Summarized:</h4>
+      <p>${summary}</p>
+      <button>Close</button>
+    `;
+    shadow.appendChild(container);
+    container.querySelector("button").addEventListener("click", () => host.remove());
+  }
+
+  // fallback 
   function showElementTextFoundPopup() {
-    const popup = document.createElement("div");
-    popup.style.position = "fixed";
-
-    popup.style.top = "50%";                // halfway down the screen
-    popup.style.right = "10px";             // 10px from the right edge
-    popup.style.transform = "translateY(-50%)"; // shift up by 50% of its height
-  
-    popup.style.width = "300px";
-    popup.style.padding = "15px";
-    popup.style.background = "white";
-    popup.style.border = "1px solid #ccc";
-    popup.style.boxShadow = "0 4px 8px rgba(0, 0, 0, 0.2)";
-    popup.style.zIndex = "10000";
-    popup.style.borderRadius = "8px";
-    popup.style.wordWrap = "break-word";
-  
-    popup.innerHTML = `<p>We detected privacy-related keywords, but there's no direct link to summarize. You may need to navigate to the privacy page manually and reload there for a summary.</p>`;
-  
-    const closeButton = document.createElement("button");
-    closeButton.innerText = "Close";
-    closeButton.style.marginTop = "10px";
-    closeButton.style.padding = "5px 10px";
-    closeButton.style.border = "none";
-    closeButton.style.background = "#00cca3";
-    closeButton.style.color = "white";
-    closeButton.style.borderRadius = "4px";
-    closeButton.style.cursor = "pointer";
-    closeButton.addEventListener("click", () => popup.remove());
-  
-    popup.appendChild(closeButton);
-    document.body.appendChild(popup);
+    alert("Privacy-related text found but no link. Please navigate to the privacy page and click the extension icon again.");
   }
-  
-  // Fallback if no link or text found
+
   function showNoLinkFoundPopup() {
-    const popup = document.createElement("div");
-    popup.style.position = "fixed";
-
-    popup.style.top = "50%";                // halfway down the screen
-    popup.style.right = "10px";             // 10px from the right edge
-    popup.style.transform = "translateY(-50%)"; // shift up by 50% of its height
-  
-    popup.style.width = "300px";
-    popup.style.padding = "15px";
-    popup.style.background = "white";
-    popup.style.border = "1px solid #ccc";
-    popup.style.boxShadow = "0 4px 8px rgba(0, 0, 0, 0.2)";
-    popup.style.zIndex = "10000";
-    popup.style.borderRadius = "8px";
-    popup.style.wordWrap = "break-word";
-  
-    popup.innerHTML = `<p>Please click the privacy page if you want a summary on what data are being collected from this site.</p>`;
-  
-    const closeButton = document.createElement("button");
-    closeButton.innerText = "Close";
-    closeButton.style.marginTop = "10px";
-    closeButton.style.padding = "5px 10px";
-    closeButton.style.border = "none";
-    closeButton.style.background = "#00cca3";
-    closeButton.style.color = "white";
-    closeButton.style.borderRadius = "4px";
-    closeButton.style.cursor = "pointer";
-    closeButton.addEventListener("click", () => popup.remove());
-  
-    popup.appendChild(closeButton);
-    document.body.appendChild(popup);
+    alert("No privacy or terms link detected. Please navigate to the privacy page and click the extension icon again.");
   }
-  
-  }
-}
